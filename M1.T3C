@@ -1,0 +1,68 @@
+//Set default state of the PIR sensor and button
+volatile int pirState = 0;
+volatile int btnState = 0;
+
+//Declare pin numbers for LED, button and PIR sensor as constants
+const int PIR_PIN = 2;
+const int BTN_PIN = 3;
+const int LED_PIN = 13;
+  
+void setup()
+{
+  //Set LED pin to output
+  pinMode(LED_PIN, OUTPUT);
+  //Set PIR pin to input
+  pinMode(PIR_PIN, INPUT);
+  //Set button pin to input
+  pinMode(BTN_PIN, INPUT);
+  //Attach interrupts to ISR
+  attachInterrupt(0, pir_ISR, CHANGE);
+  attachInterrupt(1, btn_ISR, CHANGE);
+  //Set baudrate of serial monitor and begin
+  Serial.begin(9600);
+}
+
+void loop()
+{
+  //No Loop
+}
+
+//Set PIR interrupt
+void pir_ISR()
+{
+  //Get the state of the sensor
+  pirState = digitalRead(PIR_PIN);
+  
+  //Print the change in state to serial monitor
+  if (pirState == HIGH)
+  {
+    Serial.println("Motion detected");
+  }
+  else
+  {
+    Serial.println("No motion detected");
+  }
+  
+  //Change the state of the LED pin based on the state of the button pin
+  digitalWrite(LED_PIN, pirState);
+}
+
+//Set button interrupt
+void btn_ISR()
+{
+  //Get the state of the sensor
+  btnState = digitalRead(BTN_PIN);
+  
+  //Print the change in state to serial monitor
+  if (btnState == HIGH)
+  {
+    Serial.println("Button Pressed");
+  }
+  else
+  {
+    Serial.println("Button Released");
+  }
+  
+  //Change the state of the LED pin based on the state of the button pin
+  digitalWrite(LED_PIN, btnState);
+}
