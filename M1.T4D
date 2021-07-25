@@ -1,0 +1,90 @@
+//Globally define the pin numbers for the sensors and the LED
+const int LED1_PIN = 13;
+const int LED2_PIN = 8;
+const int PIR1_PIN = 4;
+const int PIR2_PIN = 5;
+const int PIR3_PIN = 6;
+
+//Set the default state of the PIR sensors
+bool pir1State = LOW;
+bool pir2State = LOW;
+bool pir3State = LOW;
+
+//Set the default state of the LED2
+bool led2State = true;
+  
+void setup()
+{
+  //First sensor in D4 corresponds to PCINT20
+  //Second sensor in D5 corresponds to PCINT21
+  //Third sensor in D6 corresponds to PCINT22
+  //All pins are on port D, thus PCI2 can be triggered
+  PCICR |= B00000100;
+  
+  //Define which pins can trigger interrupt
+  //PCMSK2 controls PCINT16 to PCINT23
+  PCMSK2 |= B01110000;
+  
+  //Adjust timer registers TCCR1A and TCCR1B
+  //Set TCCR1A bits to 0
+  TCCR1A = 0;
+  //Set TCCR1B bits to activate 256 prescaler
+  TCCR1B = 0;
+  TCCR1B |= B00000100;
+  //Reset timer to 0
+  TCNT1 = 0;
+  
+  //Enable compare match mode on register A by setting OCIE1A to 1 
+  TIMSK1 |= B00000010;
+  
+  //Set value of register A to 31250
+  //(0.5s * 16MHZ) / prescaler(256) = 31250
+  OCR1A = 31250;
+  
+  pinMode(LED2_PIN, OUTPUT);
+
+  //Set baudrate of serial monitor and begin
+  Serial.begin(9600);
+}
+
+void loop()
+{
+  //No loop
+}
+
+//ISR vector for port D is 2 (i.e. pins D0 to D7)
+ISR(PCINT2_vect)
+{
+  //If the state for PIR1 changes, change LED state and print to serial
+  if (digitalRead(PIR1_PIN) != pir1State)
+  {
+    pir1State = !pir1State;
+    Serial.println("PIR1 state changed (D4)");
+    digitalWrite(LED1_PIN, pir1State);
+  }
+  
+  //If the state for PIR2 changes, change LED state and print to serial
+  if (digitalRead(PIR2_PIN) != pir2State)
+  {
+    pir2State = !pir2State;
+    Serial.println("PIR2 state changed (D5)");
+    digitalWrite(LED1_PIN, pir2State);
+  }
+  
+  //If the state for PIR3 changes, change LED state and print to serial
+  if (digitalRead(PIR3_PIN) != pir3State)
+  {
+    pir3State = !pir3State;
+    Serial.println("PIR3 state changed (D6)");
+    digitalWrite(LED1_PIN, pir3State);
+  }
+}
+
+//Trigger timer interrupt every 0.5 seconds
+ISR(TIMER1_COMPA_vect)
+{
+  TCNT1 = 0;
+  led2State = !led2State;
+  digitalWrite(LED2_PIN, led2State);
+  Serial.println("Toggling blue LED from timer interrupt");
+}
