@@ -1,0 +1,290 @@
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <map>
+#include <vector>
+#include <algorithm>
+
+using namespace std;
+
+#define NUM_THREADS 2
+#define NUM_SIGNALS 10
+#define TOP_N 5
+
+//Struct to hold traffic signal data
+struct trafficSignalData
+{
+    int timeHour;
+    int timeMinute;
+    int trafficID;
+    int intervalCount;
+};
+
+//2D matrix to hold the hourly counts for each of the signals
+int hourlyData[24][NUM_SIGNALS];
+
+//2D matrix to hold the top N counts for each of the signals
+pair<int, int> mostCongested[24][TOP_N];
+
+//Define mutex
+pthread_mutex_t mutexBuffer;
+pthread_mutex_t mutexUpdate;
+
+//Define semaphores
+sem_t semEmpty;
+sem_t semFull;
+
+//Define files to read from and write to
+ifstream dataFile;
+ofstream outputFile;
+
+//Set end of file flag
+bool endOfFile = false;
+
+//Declare global buffer and count variables
+//Buffer limit same size as number of traffic light id
+const int bufferLimit = 10;
+
+//Create a bounded buffer
+trafficSignalData buffer[bufferLimit];
+
+//Value to store how many items are in the buffer
+int counter = 0;
+
+//Takes the line from the CSV and casts those values to the struct
+trafficSignalData parseLine(string line)
+{
+    //Declare the struct to write the data to and then return
+    struct trafficSignalData signalData;
+
+    //Replace all commas with spaces for stringstream
+    replace(line.begin(), line.end(), ',', ' ');
+
+    //Create a stringstream for the input line
+    istringstream iss(line);
+
+    //Create the variables to save the stringstream to
+    int timeHour;
+    char colon; //absorb this
+    int timeMinute;
+    int trafficID;
+    int intervalCount;
+
+    //Assign values from stringstream into struct
+    iss >> timeHour >> colon >> timeMinute >> trafficID >> intervalCount;
+
+    //Complete the struct
+    signalData = (trafficSignalData){.timeHour = timeHour, .timeMinute = timeMinute, .trafficID = trafficID, .intervalCount = intervalCount};
+
+    //Return struct
+    return signalData;
+}
+
+void *producer(void *args)
+{
+    //Holds the line read from the data file
+    string line;
+
+    //Holds all of the traffic signal data
+    trafficSignalData signalData;
+
+    //While there is still data in the file
+    while (!dataFile.eof())
+    {
+        //Read line from csv
+        dataFile >> line;
+
+        //Convert the line into a struct to be used by the consumer
+        signalData = parseLine(line);
+
+        //Sleep 1 second to simulate the producer taking one second to produce
+        //sleep(1);
+
+        //Wait until there is an empty slot
+        sem_wait(&semEmpty);
+
+        //Lock critical part of code
+        pthread_mutex_lock(&mutexBuffer);
+
+        //Add signal data to the buffer
+        buffer[counter] = signalData;
+
+        //Increment counter
+        counter++;
+
+        //Unlock from critical part of code
+        pthread_mutex_unlock(&mutexBuffer);
+
+        //Signal to semEmpty that there is something to be consumed
+        sem_post(&semFull);
+    }
+
+    //Signal that the file has ended
+    endOfFile = true;
+}
+
+//Driver function to sort the hourly count
+bool sortByCount(const pair<int, int> &a, const pair<int, int> &b)
+{
+    return (a.second > b.second);
+}
+
+//Update and resort the list each time data comes in
+void updateMostCongested(int hour)
+{
+    //Create a an ID:COUNT pair
+    vector<pair<int, int>> temp;
+
+    //For each signal
+    for (int i = 0; i < NUM_SIGNALS; i++)
+    {
+        //Create an ID:COUNT and store in vector
+        temp.push_back(pair<int, int>(i, hourlyData[hour][i]));
+    }
+
+    outputFile << "TOP " << TOP_N << " MOST CONGESTED SIGNALS FOR HOUR " << hour << " ARE: " << endl;
+
+    //Sort the temp vector
+    sort(temp.begin(), temp.end(), sortByCount);
+
+    //Store the top N values for the hour
+    for (int i = 0; i < TOP_N; i++)
+    {
+        outputFile << temp[i].first << ": " << temp[i].second << endl;
+        mostCongested[hour][i] = temp[i];
+    }
+}
+
+void consumeData(trafficSignalData signalData)
+{
+    //Extract data from the signalData struct
+    int hour = signalData.timeHour;
+    int id = signalData.trafficID;
+    int intervalCount = signalData.intervalCount;
+
+    //Lock the 2D array while it is being updated
+    pthread_mutex_lock(&mutexUpdate);
+
+    //Increase the hourly count for the signal ID
+    hourlyData[hour][id] += intervalCount;
+
+    //Update the most list of most congested for the hour
+    updateMostCongested(hour);
+
+    //Unlock the 2D array
+    pthread_mutex_unlock(&mutexUpdate);
+}
+
+void *consumer(void *args)
+{
+    //Continue until there is nothing left in the file and the buffer
+    while (!endOfFile | counter)
+    {
+        //Instantiate the signal data
+        trafficSignalData signalData;
+
+        //Wait until there is something to be taken
+        sem_wait(&semFull);
+
+        //Lock critical part of code
+        pthread_mutex_lock(&mutexBuffer);
+
+        //Remove from buffer
+        signalData = buffer[counter - 1];
+
+        //Decrement counter
+        counter--;
+
+        //Unlock from critical part of code
+        pthread_mutex_unlock(&mutexBuffer);
+
+        //Consume data
+        consumeData(signalData);
+
+        //Signal to semFull that there is space to be filled
+        sem_post(&semEmpty);
+
+        //Sleep 1 second to simulate the consumer taking one second to consume
+        //sleep(1);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    //Initialise array of threads
+    pthread_t threads[NUM_THREADS];
+
+    //Initialising mutex
+    pthread_mutex_init(&mutexBuffer, NULL);
+    pthread_mutex_init(&mutexUpdate, NULL);
+
+    //Initialising sempahores
+    sem_init(&semEmpty, 0, bufferLimit);
+    sem_init(&semFull, 0, 0);
+
+    //Open data file
+    dataFile.open("data.txt");
+    outputFile.open("output.txt");
+
+    //Create threads
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        //Half of the threads to be used as producers
+        if (i % 2 == 0)
+        {
+            if (pthread_create(&threads[i], NULL, &producer, NULL) != 0)
+            {
+                perror("Failed to create thread");
+            }
+        }
+        //Half of the threads to be used as consumers
+        else
+        {
+            if (pthread_create(&threads[i], NULL, &consumer, NULL) != 0)
+            {
+                perror("Failed to create thread");
+            }
+        }
+    }
+
+    //Rejoin threads
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        if (pthread_join(threads[i], NULL) != 0)
+        {
+            perror("Failed to join thread");
+        }
+    }
+
+    //Destroying mutex
+    pthread_mutex_destroy(&mutexBuffer);
+    pthread_mutex_destroy(&mutexUpdate);
+
+    //Destroying semaphores
+    sem_destroy(&semEmpty);
+    sem_destroy(&semFull);
+
+    outputFile << "=======================================" << endl;
+    outputFile << "================Summary================" << endl;
+    outputFile << "=======================================" << endl;
+
+    for (int i = 0; i < 24; i++)
+    {
+        outputFile << "TOP " << TOP_N << " MOST CONGESTED SIGNALS FOR HOUR " << i << " ARE: " << endl;
+
+        for (int j = 0; j < TOP_N; j++)
+        {
+            outputFile << mostCongested[i][j].first << ": " << mostCongested[i][j].second << endl;
+        }
+    }
+
+    outputFile.close();
+
+    cout << "Done!" << endl;
+
+    return 0;
+}
