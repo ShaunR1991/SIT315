@@ -1,0 +1,100 @@
+#include <mpi.h>
+#include <iostream>
+#include <cstdlib>
+#include <time.h>
+#include <chrono>
+
+using namespace std::chrono;
+using namespace std;
+
+void randomVector(int vector[], int size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        //Insert a random number between 1 and 100 into the vector
+        vector[i] = rand() % 100;
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    //Seed for randomising
+    srand(time(0));
+    
+    //Size of arrays
+    unsigned long size = 100000000;
+
+    //Three vector variables
+    int *v1, *v2, *v3;
+
+    //Total number of processes
+    int num_processes;
+
+    //Rank of each process
+    int rank_process;
+
+    //Number of elements per proc
+    int n_per_proc;
+
+    //Get current time to measure how long the function takes to run
+    auto start = high_resolution_clock::now();
+
+    //Initialise MPI environment
+    MPI_Init(&argc, &argv);
+
+    //Total number of processes running in parallel
+    MPI_Comm_size(MPI_COMM_WORLD, &num_processes);
+
+    //Rank each process
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_process);
+
+    //Assume master node is task 0
+    if (rank_process == 0)
+    {
+        //Allocate memory in heap to vectors
+        v1 = (int *)malloc(size * sizeof(int *));
+        v2 = (int *)malloc(size * sizeof(int *));
+        v3 = (int *)malloc(size * sizeof(int *));
+
+        //Create random vectors
+        randomVector(v1, size);
+        randomVector(v2, size);
+    }
+
+    //Divide the number of elements evenly among each process
+    n_per_proc = size / num_processes;
+
+    //Create smaller vectors that will be used for execution on each of the other processes
+    int *v1_par, *v2_par, *v3_par;
+
+    //Allocate memory to smaller vectors
+    v1_par = (int *)malloc(n_per_proc * sizeof(int *));
+    v2_par = (int *)malloc(n_per_proc * sizeof(int *));
+    v3_par = (int *)malloc(n_per_proc * sizeof(int *));
+
+    //Scatter the original vectors from master to workers
+    MPI_Scatter(v1, n_per_proc, MPI_INT, v1_par, n_per_proc, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Scatter(v2, n_per_proc, MPI_INT, v2_par, n_per_proc, MPI_INT, 0, MPI_COMM_WORLD);
+
+    //Do the vector addition
+    for (int i = 0; i < n_per_proc; i++)
+    {
+        v3_par[i] = v1_par[i] + v2_par[i];
+    }
+
+    //Gather the calculations from workers back to master
+    MPI_Gather(v3_par, n_per_proc, MPI_INT, v3, n_per_proc, MPI_INT, 0, MPI_COMM_WORLD);
+
+    //Finalise MPI
+    MPI_Finalize();
+
+    auto stop = high_resolution_clock::now();
+
+    //Gets time taken between the start and stop of clock
+    auto duration = duration_cast<microseconds>(stop - start);
+
+    cout << "Time taken by function: "
+         << duration.count() << " microseconds" << endl;
+
+    return 0;
+}
