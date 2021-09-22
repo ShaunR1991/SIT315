@@ -114,7 +114,7 @@ int main(int argc, char **argv)
     The number of global work items in work dimensions that will execute the kernel function.
     The total number of global work-items is computed as this value multiplied by each of the work dimensions (in this case, only one dimension).
     */
-    size_t global[] = {(size_t)array_size};
+    size_t global[] = {(size_t)array_size + 1};
 
     //Print initial matrices
     print(data, array_size);
