@@ -160,7 +160,7 @@ int main(int argc, char **argv)
         Event Wait list         -   Events that need to complete before this command can be executed
         Event                   -   Returns an event that identifies this particular kernel instance.
    */
-    clEnqueueReadBuffer(queue, buf_data, CL_FALSE, 0, array_size * sizeof(int), &data[0], 0, NULL, NULL);
+    clEnqueueReadBuffer(queue, buf_data, CL_TRUE, 0, array_size * sizeof(int), &data[0], 0, NULL, NULL);
 
     //Print resulting matrix
     print(data, array_size);
