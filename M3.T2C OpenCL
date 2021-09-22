@@ -1,0 +1,400 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <CL/cl.h>
+#include <time.h>
+#include <chrono>
+#include <iostream>
+
+using namespace std::chrono;
+using namespace std;
+
+#define PRINT 1
+
+int array_size = 8;
+int *data;
+int *data_stack;
+
+/*
+Stores the buffer created by the clCreateBuffer function.
+This is the conduit through which data is communicated from the host application to the kernels.
+*/
+cl_mem buf_data;
+cl_mem buf_stack;
+
+/*
+Stores the device ID returned by the create_device function.
+This device is used when creating the context, the program and the command queue.
+*/
+cl_device_id device_id;
+
+/*
+Context is used for managing command queues, memory, program and kernel objects as well as executing kernels on devices specified in the context
+*/
+cl_context context;
+
+/*
+Stores the the compiled and linked program that is executable from the program source
+Contains the code block to be executed on the device (in this case, the code stored in the vector_ops.cl file)
+*/
+cl_program program;
+
+/*
+Stores the kernel object.
+Contains the program with the successfully built executable.
+*/
+cl_kernel kernel;
+
+/*
+Holds the commands to be executed on a device in the context specified.
+Each queue can only point to one device within a context.
+*/
+cl_command_queue queue;
+
+cl_event event = NULL;
+
+int err;
+
+/*
+Firstly identifies the platform.
+From the platform, identifies whether a GPU is available to use as a device. If available, returns GPU as the device.
+If no GPU available, identifies whether a CPU is available to use as a device. If available, returns CPU as the device.
+If CPU is also not available to use as device, returns an error as no devices are available to use.
+*/
+cl_device_id create_device();
+
+/*
+Executes initialisation of the OpenCL device.
+Gets the device ID.
+Creates the context using the device ID.
+Builds the program using the input file, the device ID and the correpsonding context.
+Creates the a command queue on the specified device using the corresponding context.
+Creates the kernel using the program.  
+*/
+void setup_openCL_device_context_queue_kernel(char *filename, char *kernelname);
+
+/*
+Reads the supplied program file name and places the content of that file into the buffer.
+Program is the created for the context and loads the source code into the program object.
+Program is then built for the device to use.
+*/
+cl_program build_program(cl_context ctx, cl_device_id dev, const char *filename);
+
+/*
+Creates a buffer object and then copies the data to the device.
+*/
+void setup_kernel_memory();
+
+/*
+Sets the arguments values for the kernel based on values in the host program.
+*/
+void copy_kernel_args();
+
+/*
+Frees the buffers and OpenCL objects.
+*/
+void free_memory();
+
+void init(int *&array, int *&stack, int size);
+void print(int *array, int size);
+
+int main(int argc, char **argv)
+{
+    if (argc > 1)
+    {
+        array_size = atoi(argv[1]);
+    }
+
+    //Get current time to measure how long the function takes to run
+    auto start = high_resolution_clock::now();
+
+    //Initialise matrices
+    init(data, data_stack, array_size);
+
+    /*
+    The number of global work items in work dimensions that will execute the kernel function.
+    The total number of global work-items is computed as this value multiplied by each of the work dimensions (in this case, only one dimension).
+    */
+    size_t global[] = {(size_t)array_size};
+
+    //Print initial matrices
+    print(data, array_size);
+
+    /*
+    Setup the device, context, queue program and kernel
+    Set file name (1) and kernel name (2)
+    */
+    setup_openCL_device_context_queue_kernel((char *)"./vector_ops.cl", (char *)"iterativeQuicksort");
+
+    //Load/copy memory and link arguments
+    setup_kernel_memory();
+    copy_kernel_args();
+
+    /*
+    Enqueues a command to execute a kernel on a device.
+    Arguments:
+        Command Queue           -   A valid host command queue. The kernel will be queued for execution on the device associated with this command queue.
+        Kernel                  -   A valid kernel object. The OpenCL context associated with the kernal and command queue must be the same.
+        Work Dimensions         -   The number of dimensions used to specify the global work-items and work-items in the workgroup. 
+        Global Work Offset      -   Specifies an array of work dimensions that decribed the offset used to calculate the global ID of a work item.
+        Global Work Size        -   Points to an array of work dimension values that describe the number of global work items in work dimensions that will execute the kernel function.
+        Local Work Size         -   Points to an array of work dimension values that describe the number of work items that make up a workgroup that will execute the kernel.
+        Num Events In Wait List -   Number of events in the wait list   
+        Event Wait list         -   Events that need to complete before this command can be executed
+        Event                   -   Returns an event that identifies this particular kernel instance.
+    */
+    clEnqueueNDRangeKernel(queue, kernel, 1, NULL, global, NULL, 0, NULL, &event);
+    clWaitForEvents(1, &event);
+
+    /*
+    Enqueue commands to read from a buffer object to host memory, i.e. copies memory from devices back to host.
+    Arguments:
+        Command Queue           -   A valid host command queue in which the read command will be queued. Must be created with the same context as the buffer.
+        Buffer                  -   A valid buffer object. Must be created with the same context as the command queue.
+        Blocking Read           -   A boolean that indicates if the read operations are blocking or non-blocking.
+                                        True = Does not return until the buffer data has been read and coped into memory pointed to by the pointer argument.
+                                        False = Queues a non-blocking read command and returns. The contents of the buffer cannot be used until the read command is complete.
+        Offset                  -   The offset in bytes in the buffer to read from
+        Size                    -   The size of the data being read
+        Pointer                 -   Points to the buffer in host memory where data is to be read into.
+        Num Events In Wait List -   Number of events in the wait list   
+        Event Wait list         -   Events that need to complete before this command can be executed
+        Event                   -   Returns an event that identifies this particular kernel instance.
+   */
+    clEnqueueReadBuffer(queue, buf_data, CL_FALSE, 0, array_size * sizeof(int), &data[0], 0, NULL, NULL);
+
+    //Print resulting matrix
+    print(data, array_size);
+
+    //Free memory for device, kernel, queue, etc.
+    free_memory();
+
+    auto stop = high_resolution_clock::now();
+
+    /*
+    Gets the time taken for the function to run by  
+    subtracting the start time from time taken at stop
+    */
+    auto duration = duration_cast<microseconds>(stop - start);
+
+    //Print total duration to console
+    cout << "Time taken by function: " << duration.count() << " microseconds" << endl;
+}
+
+void init(int *&array, int *&stack, int size)
+{
+    array = (int *)malloc(sizeof(int) * size);
+    stack = (int *)malloc(sizeof(int) * size);
+
+    for (long i = 0; i < (size); i++)
+    {
+        array[i] = rand() % 100; // any number less than 100
+    }
+}
+
+void print(int *array, int size)
+{
+    if (PRINT == 0)
+    {
+        return;
+    }
+
+    for (long i = 0; i < size; i++)
+    {
+        cout << array[i] << " ";
+    }
+    printf("\n----------------------------\n");
+}
+
+void free_memory()
+{
+    //free the buffers
+    clReleaseMemObject(buf_data);
+    clReleaseMemObject(buf_stack);
+
+    //free opencl objects
+    clReleaseKernel(kernel);
+    clReleaseCommandQueue(queue);
+    clReleaseProgram(program);
+    clReleaseContext(context);
+
+    free(data);
+    free(data_stack);
+}
+
+void copy_kernel_args()
+{
+    /*
+    Sets the argument value for a specific argument of a kernel.
+    Arguments:
+        Kernel          -   A valid kernel object
+        Argument Index  -   The Argument index. Arguments in the kernal are referred by indicies.
+        Argument Size   -   Specifies the size of the argument value. 
+        Argument Value  -   A pointer to data that should be used as the argument value specified by the argument index.
+   */
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&buf_data);
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&buf_stack);
+
+    if (err < 0)
+    {
+        perror("Couldn't create a kernel argument");
+        printf("error = %d", err);
+        exit(1);
+    }
+}
+
+void setup_kernel_memory()
+{
+    /*
+    Creates buffer objects.
+    Arguments:
+        Context             -   A valid OpenCL context used to create the buffer object
+        Flags               -   Specifies allocation and usage information such as th ememory arena that should be used to allocate the buffer and how it will be used.
+        Size                -   Size in bytes of the buffer memory
+        Host Pointer        -   A pointer to the buffer data that may already be allocated by the appplication
+        Error Code Return   -   Returns an appropriate error code if set, otherwise no error code returned if null.
+    */
+    buf_data = clCreateBuffer(context, CL_MEM_READ_WRITE, array_size * sizeof(int), NULL, NULL);
+    buf_stack = clCreateBuffer(context, CL_MEM_READ_WRITE, array_size * sizeof(int), NULL, NULL);
+
+    // Copy data and stack to the device
+    clEnqueueWriteBuffer(queue, buf_data, CL_TRUE, 0, array_size * sizeof(int), &data[0], 0, NULL, NULL);
+    clEnqueueWriteBuffer(queue, buf_stack, CL_TRUE, 0, array_size * sizeof(int), &data_stack[0], 0, NULL, NULL);
+}
+
+void setup_openCL_device_context_queue_kernel(char *filename, char *kernelname)
+{
+    device_id = create_device();
+    cl_int err;
+
+    /*
+    Creates an OpenCL Context and stores it in the cl_context variable.
+    Context is used for managing command queues, memory, program and kernel objects as well as executing kernels on devices specified in the context
+   */
+    context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &err);
+    if (err < 0)
+    {
+        perror("Couldn't create a context");
+        exit(1);
+    }
+
+    program = build_program(context, device_id, filename);
+
+    /*
+    Creates a command queue on the specified device.
+    Requires a context to create the queue and the device to point to.
+    The properties argument specifies a list of properties for the command queue. A 0 in this field terminates the list.
+   */
+    queue = clCreateCommandQueueWithProperties(context, device_id, 0, &err);
+    if (err < 0)
+    {
+        perror("Couldn't create a command queue");
+        exit(1);
+    };
+
+    kernel = clCreateKernel(program, kernelname, &err);
+    if (err < 0)
+    {
+        perror("Couldn't create a kernel");
+        printf("error =%d", err);
+        exit(1);
+    };
+}
+
+cl_program build_program(cl_context ctx, cl_device_id dev, const char *filename)
+{
+
+    cl_program program;
+    FILE *program_handle;
+    char *program_buffer, *program_log;
+    size_t program_size, log_size;
+
+    /* 
+   Read program file and place content into buffer 
+   */
+    program_handle = fopen(filename, "r");
+    if (program_handle == NULL)
+    {
+        perror("Couldn't find the program file");
+        exit(1);
+    }
+    fseek(program_handle, 0, SEEK_END);
+    program_size = ftell(program_handle);
+    rewind(program_handle);
+    program_buffer = (char *)malloc(program_size + 1);
+    program_buffer[program_size] = '\0';
+    fread(program_buffer, sizeof(char), program_size, program_handle);
+    fclose(program_handle);
+
+    /*
+    Creates a program object for a context and loads source code specified by text strings into the program object
+    Arguments:
+        Context             -   A valid OpenCL context
+        Count               -   Number of strings in the strings parameter
+        Strings             -   Array of Count pointers to optionally null-terminated character strings that make up the source code.
+        Lengths             -   An array with the number of chars in each string. 
+        Error Code Return   -   Returns an appropriate error code if set, otherwise no error code returned if null.
+    */
+    program = clCreateProgramWithSource(ctx, 1, (const char **)&program_buffer, &program_size, &err);
+    if (err < 0)
+    {
+        perror("Couldn't create the program");
+        exit(1);
+    }
+    free(program_buffer);
+
+    /* 
+   Build program 
+   The fourth parameter accepts options that configure the compilation. 
+   These are similar to the flags used by gcc. 
+   For example, you can define a macro with the option -DMACRO=VALUE and turn off optimization with -cl-opt-disable.
+   */
+    err = clBuildProgram(program, 0, NULL, NULL, NULL, NULL);
+    if (err < 0)
+    {
+
+        /* 
+      Find size of log and print to std output 
+      */
+        clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        program_log = (char *)malloc(log_size + 1);
+        program_log[log_size] = '\0';
+        clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
+        printf("%s\n", program_log);
+        free(program_log);
+        exit(1);
+    }
+
+    return program;
+}
+
+cl_device_id create_device()
+{
+
+    cl_platform_id platform;
+    cl_device_id dev;
+    int err;
+
+    /* Identify a platform */
+    err = clGetPlatformIDs(1, &platform, NULL);
+    if (err < 0)
+    {
+        perror("Couldn't identify a platform");
+        exit(1);
+    }
+
+    // Access a device
+    // GPU
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
+    if (err == CL_DEVICE_NOT_FOUND)
+    {
+        // CPU
+        err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1, &dev, NULL);
+    }
+    if (err < 0)
+    {
+        perror("Couldn't access any devices");
+        exit(1);
+    }
+
+    return dev;
+}
