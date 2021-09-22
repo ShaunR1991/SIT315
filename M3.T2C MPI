@@ -1,0 +1,349 @@
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <iostream>
+#include <stack>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+#include <time.h>
+
+using namespace std;
+using namespace std::chrono;
+
+long array_size = 1000000;
+
+/*
+Iteratively conducts quicksort.
+Using iterative implementation over recursive for use in OpenCL
+Takes the input array  and size of the array to sort
+*/
+void iterativeQuicksort(int *array, int *stack, int chunk_size);
+
+//Function to merge chunks of arrays together
+int *merge(int *chunk1, int chunk1_size, int *chunk2, int chunk2_size);
+
+int main(int argc, char **argv)
+{
+    //Change size of array based on input, else default of 8
+    if (argc > 1)
+    {
+        array_size = atoi(argv[1]);
+    }
+
+    //Array with original data
+    int *data = NULL;
+    int *stack = NULL;
+
+    //Size of chunks distributed to each worker
+    int chunk_size;
+
+    //Size of the chunk on the process - will grow as chunks merge
+    int local_chunk_size;
+
+    //Var to hold the array for each chunk and its stack
+    int *chunk;
+    int *chunk_stack;
+
+    MPI_Status status;
+
+    //Initiate clock to time how long the quicksort takes to complete
+    auto start = high_resolution_clock::now();
+
+    //Initialise MPI
+    MPI_Init(NULL, NULL);
+
+    //Get number of processes
+    int num_processes;
+    MPI_Comm_size(MPI_COMM_WORLD, &num_processes);
+
+    //Throw error and exit if unable to evenly distribute array over number of processes
+    if (array_size % num_processes != 0)
+    {
+        fprintf(stderr, "Cannot evenly distribute array over selected number of processes, set new -np value\n");
+        return -1;
+    }
+
+    //Get ranks of each node, 0 = master
+    int process_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &process_rank);
+
+    //Conduct on master node
+    if (process_rank == 0)
+    {
+        //Allocate memory for the unsorted array
+        data = (int *)malloc(array_size * sizeof(int));
+        stack = (int *)malloc(array_size * sizeof(int));
+
+        //Populate array with random numbers less than 100
+        for (long i = 0; i < array_size; i++)
+        {
+            data[i] = rand() % 100;
+        }
+
+        //Print array
+        printf("Unsorted array: \n");
+        if (array_size < 50)
+        {
+            for (int i = 0; i < array_size; i++)
+            {
+                printf("%d  ", data[i]);
+            }
+            printf("\n");
+        }
+        //If array is large, print first and last 5 elements.
+        else
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                printf("%d  ", data[i]);
+            }
+
+            printf("....  ");
+
+            for (int i = array_size - 5; i < array_size; i++)
+            {
+                printf("%d  ", data[i]);
+            }
+
+            printf("\n");
+        }
+    }
+
+    //Blocks all process until reach this point so that the master can create the array to sort
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    //Broadcast the array size to all the process from master process
+    MPI_Bcast(&array_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    //Calculate number of elements in each of the chunks to be sent to workers
+    chunk_size = array_size / num_processes;
+
+    //Allocate memory for each chunk and chunk stack
+    chunk = (int *)malloc(chunk_size * sizeof(int));
+    chunk_stack = (int *)malloc(chunk_size * sizeof(int));
+
+    //Scatter the data and stack in chunk sizes to all processes
+    MPI_Scatter(data, chunk_size, MPI_INT, chunk, chunk_size, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Scatter(stack, chunk_size, MPI_INT, chunk_stack, chunk_size, MPI_INT, 0, MPI_COMM_WORLD);
+
+    //Initialise local_chunk_size to use while merging chunks after quicksort
+    local_chunk_size = chunk_size;
+
+    //Conduct quicksort on each chunk
+    iterativeQuicksort(chunk, chunk_stack, chunk_size);
+
+    /*
+    Each step represents the number of original chunks that are merging together
+    I.E. step 1 is merging two chunks together of size 1 original chunk
+         step 2 is merging two chunks together of size 2 original chunks
+         step 4 is merging two chunks together of size 4 original chunks
+    With the idea that each time through the for loop, the chunks are combined until only 1 sorted array remains
+    */
+    for (int step = 1; step < num_processes; step = 2 * step)
+    {
+        /*
+        Determine whether the process is sending or receiving another chunk
+        In line with the steps:
+            First time through, every even process (including 0) is receiving, every odd process is sending.
+            Second time through, every fourth process (including 0) is receiving, every other process is sending.
+            Third time through, every eighth process (including 0) is receiving, every other process is sending.
+        This pattern continues based on the number of processes.
+        */
+
+        //Find process who is sending. Once sent, that worker is done.
+        if (process_rank % (2 * step) != 0)
+        {
+            MPI_Send(chunk, local_chunk_size, MPI_INT, process_rank - step, 0, MPI_COMM_WORLD);
+            break;
+        }
+
+        //Find receiving process. Receving process will continue until only one sorted array remains.
+        if (process_rank + step < num_processes)
+        {
+            //Variable to store the new chunk size
+            int chunk_to_merge_size;
+
+            //If the new chunk size is smaller than the original array, it is not the final merge
+            if (array_size >= chunk_size * (process_rank + 2 * step))
+            {
+                chunk_to_merge_size = chunk_size * step;
+            }
+
+            //If the new chunk size to be calculated were to be larger than the original array, this is the last merge.
+            else
+            {
+                chunk_to_merge_size = array_size - chunk_size * (process_rank + step);
+            }
+
+            //Allocate memory on the current process for the chunk to be received from another process
+            int *chunk_to_merge;
+            chunk_to_merge = (int *)malloc(chunk_to_merge_size * sizeof(int));
+
+            //Receive the chunk from the process it is merging with
+            MPI_Recv(chunk_to_merge, chunk_to_merge_size, MPI_INT, process_rank + step, 0, MPI_COMM_WORLD, &status);
+
+            //Merge the chunks
+            data = merge(chunk, local_chunk_size, chunk_to_merge, chunk_to_merge_size);
+
+            //Assign the merged data to the chunk for further merging
+            chunk = data;
+
+            //Increase the local chunk size to equal the size of the merged chunks
+            local_chunk_size = local_chunk_size + chunk_to_merge_size;
+        }
+    }
+
+    if (process_rank == 0)
+    {
+        //Print array
+        printf("Sorted array: \n");
+        if (array_size < 50)
+        {
+            for (int i = 0; i < array_size; i++)
+            {
+                printf("%d  ", chunk[i]);
+            }
+            printf("\n");
+        }
+        //If array is large, print the first and last 5 digits
+        else
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                printf("%d  ", chunk[i]);
+            }
+
+            printf("....  ");
+
+            for (int i = array_size - 5; i < array_size; i++)
+            {
+                printf("%d  ", chunk[i]);
+            }
+
+            printf("\n");
+
+            //Stop clock to see how long the matrix took to calculate
+            auto stop = high_resolution_clock::now();
+
+            //Calculate the difference between the start and stop timepoints of the timer
+            auto duration = duration_cast<milliseconds>(stop - start);
+
+            //Output time taken to console
+            cout << "Time taken to quicksort: " << duration.count() << " milliseconds" << endl;
+        }
+    }
+
+    //Finalise MPI world
+    MPI_Finalize();
+    return 0;
+}
+
+void iterativeQuicksort(int *array, int *stack, int chunk_size)
+{
+    //Get the starting and ending index of the given array
+    int left = 0;
+    int right = chunk_size - 1;
+
+    //Top of stack
+    int top = -1;
+
+    //Temp value for swapping
+    int temp;
+
+    //Create the left:right pair and push into stack
+    stack[++top] = left;
+    stack[++top] = right;
+
+    //Loop until the stack is empty
+    while (top >= 0)
+    {
+        //Get subarray using the first left:right pair from the stack
+        right = stack[top--];
+        left = stack[top--];
+
+        //Take the right element as the pivot
+        int pivot = array[right];
+
+        //Elements less than the pivot go left of idx, those greater go to the right
+        int idx = left;
+
+        /*
+        Increment idx each time an element is found to be less than or equal to the pivot
+        Place element before the idx
+        */
+        for (int i = left; i < right; i++)
+        {
+            if (array[i] <= pivot)
+            {
+                temp = array[i];
+                array[i] = array[idx];
+                array[idx] = temp;
+                idx++;
+            }
+        }
+
+        //Swap the idx with the pivot
+        temp = array[idx];
+        array[idx] = array[right];
+        array[right] = temp;
+
+        //Indices of elements less than current pivot are pushed to the stack
+        if (idx - 1 > left)
+        {
+            stack[++top] = left;
+            stack[++top] = idx - 1;
+        }
+
+        //Indices of elements greater than current pivot are pushed to the stack
+        if (idx + 1 < right)
+        {
+            stack[++top] = idx + 1;
+            stack[++top] = right;
+        }
+    }
+}
+
+int *merge(int *chunk1, int chunk1_size, int *chunk2, int chunk2_size)
+{
+    //Allocate memory for merged chunk
+    int *merged_chunk = (int *)malloc((chunk1_size + chunk2_size) * sizeof(int));
+
+    //Vars for each of the indicies in each of the chunks
+    int i = 0;
+    int j = 0;
+
+    //Iterate through each of the indices in both chunks to merge them
+    for (int k = 0; k < chunk1_size + chunk2_size; k++)
+    {
+        //If no more elements left in chunk 1, keep adding the elements from chunk 2 to the merged chunk
+        if (i >= chunk1_size)
+        {
+            merged_chunk[k] = chunk2[j];
+            j++;
+        }
+
+        //If no more elements left in chunk 2, keep adding the elements from chunk 1 to the merged chunk
+        else if (j >= chunk2_size)
+        {
+            merged_chunk[k] = chunk1[i];
+            i++;
+        }
+
+        //Compare elements and place the smallest into the merged chunk
+        else if (chunk1[i] < chunk2[j])
+        {
+            merged_chunk[k] = chunk1[i];
+            i++;
+        }
+
+        else
+        {
+            merged_chunk[k] = chunk2[j];
+            j++;
+        }
+    }
+    return merged_chunk;
+}
